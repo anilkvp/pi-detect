@@ -1,0 +1,14 @@
+[package]
+name = "pi-detect"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8.9"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "net"] }
+tract-onnx = "0.23.10"
+tract-linalg = { version = "=0.23.10", features = ["multithread-mm"] }

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-detect</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 16px/1.4 system-ui, sans-serif; background: #0f1115; color: #e8eaed; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  p.sub { margin: 0 0 14px; color: #9aa0a6; font-size: 14px; }
+  .btn { display: inline-block; background: #4c8bf5; color: #fff; border: 0; border-radius: 10px;
+         padding: 12px 18px; font-size: 16px; cursor: pointer; }
+  input[type=file] { display: none; }
+  .stage { position: relative; margin-top: 14px; background: #181b22; border-radius: 12px; overflow: hidden; }
+  canvas { display: block; width: 100%; height: auto; }
+  .row { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .row label { color: #9aa0a6; font-size: 14px; }
+  input[type=range] { flex: 1; min-width: 140px; }
+  #counts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip { background: #232834; border-radius: 999px; padding: 6px 12px; font-size: 15px; }
+  .chip b { color: #7ee787; }
+  #total { font-size: 28px; font-weight: 700; margin-top: 12px; }
+  #stats { margin-top: 10px; color: #9aa0a6; font-size: 13px; }
+  #err { color: #ff7b72; margin-top: 10px; }
+  .busy { opacity: .6; pointer-events: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>pi-detect</h1>
+  <p class="sub">Photo in, objects out. Runs fully on this Raspberry Pi &mdash; no cloud.</p>
+
+  <label class="btn" id="pick">Take / choose photo
+    <input id="file" type="file" accept="image/*" capture="environment">
+  </label>
+
+  <div class="stage"><canvas id="cv" width="640" height="360"></canvas></div>
+
+  <div id="total"></div>
+  <div id="counts"></div>
+
+  <div class="row">
+    <label for="conf">Confidence</label>
+    <input id="conf" type="range" min="10" max="90" value="35">
+    <span id="confv">35%</span>
+  </div>
+
+  <div id="stats"></div>
+  <div id="err"></div>
+</main>
+
+<script>
+const MAX_SIDE = 640;           // downscale in the browser: faster upload, less work for the Pi
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const fileEl = document.getElementById('file');
+const confEl = document.getElementById('conf');
+let bitmapCanvas = null;        // the downscaled photo that was uploaded
+let result = null;              // last server response
+
+const PALETTE = ['#ff6b6b','#4dabf7','#51cf66','#fcc419','#cc5de8','#ff922b','#22b8cf','#f06595','#94d82d','#845ef7'];
+const colorFor = id => PALETTE[id % PALETTE.length];
+
+fileEl.addEventListener('change', async () => {
+  const f = fileEl.files[0];
+  if (!f) return;
+  setErr('');
+  document.body.classList.add('busy');
+  document.getElementById('stats').textContent = 'Analysing on the Pi…';
+  try {
+    const bmp = await createImageBitmap(f, { imageOrientation: 'from-image' });
+    const s = Math.min(1, MAX_SIDE / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * s), h = Math.round(bmp.height * s);
+    bitmapCanvas = document.createElement('canvas');
+    bitmapCanvas.width = w; bitmapCanvas.height = h;
+    bitmapCanvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const blob = await new Promise(r => bitmapCanvas.toBlob(r, 'image/jpeg', 0.9));
+    const t0 = performance.now();
+    // ask for a low threshold once; the slider then filters instantly in the browser
+    const resp = await fetch('/detect?conf=0.15', { method: 'POST', body: blob });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    data.roundtrip_ms = Math.round(performance.now() - t0);
+    result = data;
+    render();
+  } catch (e) {
+    setErr(String(e.message || e));
+    document.getElementById('stats').textContent = '';
+  } finally {
+    document.body.classList.remove('busy');
+    fileEl.value = '';
+  }
+});
+
+confEl.addEventListener('input', () => {
+  document.getElementById('confv').textContent = confEl.value + '%';
+  if (result) render();
+});
+
+function setErr(m) { document.getElementById('err').textContent = m; }
+
+function render() {
+  const thr = confEl.value / 100;
+  const dets = result.detections.filter(d => d.score >= thr);
+  cv.width = bitmapCanvas.width; cv.height = bitmapCanvas.height;
+  ctx.drawImage(bitmapCanvas, 0, 0);
+  const lw = Math.max(2, cv.width / 220);
+  const fs = Math.max(12, Math.round(cv.width / 38));
+  ctx.lineWidth = lw; ctx.font = `600 ${fs}px system-ui, sans-serif`; ctx.textBaseline = 'top';
+  for (const d of dets) {
+    const c = colorFor(d.class_id);
+    ctx.strokeStyle = c; ctx.strokeRect(d.x, d.y, d.w, d.h);
+    const label = `${d.label} ${Math.round(d.score * 100)}%`;
+    const tw = ctx.measureText(label).width + 8;
+    const ty = d.y - fs - 4 < 0 ? d.y : d.y - fs - 4;
+    ctx.fillStyle = c; ctx.fillRect(d.x, ty, tw, fs + 4);
+    ctx.fillStyle = '#0b0d10'; ctx.fillText(label, d.x + 4, ty + 2);
+  }
+  const counts = {};
+  dets.forEach(d => counts[d.label] = (counts[d.label] || 0) + 1);
+  document.getElementById('total').textContent =
+    dets.length ? `${dets.length} object${dets.length === 1 ? '' : 's'} found` : 'Nothing found at this confidence';
+  const box = document.getElementById('counts');
+  box.innerHTML = '';
+  Object.entries(counts).sort((a, b) => b[1] - a[1]).forEach(([k, v]) => {
+    const el = document.createElement('div');
+    el.className = 'chip'; el.innerHTML = `${k} <b>×${v}</b>`; box.appendChild(el);
+  });
+  const t = result.timings;
+  document.getElementById('stats').textContent =
+    `Pi inference ${Math.round(t.infer_ms)} ms · total on Pi ${Math.round(t.total_ms)} ms · round trip ${result.roundtrip_ms} ms · model ${result.model_input}px`;
+}
+</script>
+</body>
+</html>
